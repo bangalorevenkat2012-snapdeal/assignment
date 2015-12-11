@@ -1,0 +1,115 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+
+
+   - name: ec2 provisioning
+     ec2:
+        aws_access_key: SECRETKSECRETSECRETA
+        aws_secret_key: mThisIsSuperSecretN
+        key_name: agility_keypair
+        region: ap-southeast-1
+        instance_type: t2.micro
+        image: ami-96f1c1c4
+        wait: yes
+        exact_count: 1
+        count_tag:
+           Name: Demo
+        instance_tags:
+           Name: Demo
+     register: ec2
+
+   - name: Add all instance public IPs to host group
+     add_host: hostname={{ item.public_ip }} groups=managed_tomcat_ec2
+     with_items: ec2.instances
+   - name: Wait for SSH to come up
+     wait_for: host={{ item.public_dns_name }} port=22 delay=60 timeout=320 state=started
+     with_items: ec2.instances
+
+- hosts: managed_tomcat_ec2
+  user: ubuntu
+  gather_facts: true
+
+  vars:
+    mysql_db: agility
+    mysql_user: agility
+    mysql_password: roots
+    tomcat_admin: admin
+    tomcat_password: roots
+  tasks:
+    - name: Update apt cache
+      apt: update_cache=yes cache_valid_time=3600
+      sudo: yes
+
+    - name: Install required software
+      apt: name={{ item }} state=present
+      sudo: yes
+      with_items:
+        - apache2
+        - mysql-server
+        - tomcat7
+        - tomcat7-docs
+        - tomcat7-admin
+        - tomcat7-examples
+
+    - name: Tomcat Change Java options
+      lineinfile:
+        dest=/etc/default/tomcat7
+        regexp="^JAVA_OPTS=.*"
+        line="JAVA_OPTS=\"-Djava.security.egd=file:/dev/./urandom -Djava.awt.headless=true -Xmx512m -XX:MaxPermSize=256m -XX:+UseConcMarkSweepGC\""
+        state=present
+      notify:
+        - restart tomcat
+      sudo: yes
+
+    - name: Tomcat Admin User
+      lineinfile:
+        dest=/etc/tomcat7/tomcat-users.xml
+        regexp="^.*\<user username=\"{{ tomcat_admin }}.*"
+        line="<user username=\"{{ tomcat_admin }}\" password=\"{{ tomcat_password }}\" roles=\"manager-gui,admin-gui,manager-script\"/>"
+        state=present
+        insertafter="\<tomcat-users\>"
+      notify:
+        - restart tomcat
+      sudo: yes
+
+  handlers:
+    - name: restart tomcat
+      service: name=tomcat7 state=restarted
+      sudo: yes
+
+- hosts: localhost
+  vars:
+    mysql_user: agility
+    ip_address: "{{ hostvars[groups['managed_tomcat_ec2'][0]]['inventory_hostname'] }}"
+
+  tasks:
+    - name: Create a temporary file
+      shell: mktemp
+      sudo: yes
+      register: maktemp_output
+    - debug: var=maktemp_output.stdout_lines
+
+    - name: Copy sample job
+      shell: cp -v /var/lib/jenkins/jobs/petclinic/config.xml {{ maktemp_output.stdout }}.xml
+      sudo: yes
+      register: copy_output
+    - debug: var=copy_output.stdout_lines
+
+    - name: Change Tomcat container in the job
+      lineinfile:
+        dest={{ maktemp_output.stdout }}.xml
+        regexp="<url>http://.*:8080/</url>"
+        line="<url>http://{{ ip_address }}:8080/</url>"
+        state=present
+
+
+    - name: Create the jenkins job
+      shell: curl -s -XPOST 'http://45.63.96.167:8090/createItem?name=petclinic_{{ ip_address }}' --data-binary @{{ maktemp_output.stdout }}.xml -H "Content-Type:text/xml" --user agility:1secretsecretsecret8dec84dd34d45
+      sudo: yes
+
+    - name: Run it once
+      shell: curl -s -XPOST 'http://45.63.96.167:8090/job/petclinic_{{ ip_address }}/build?delay=0sec' --user agility:1secretsecretsecret8dec84dd34d45
+      sudo: yes
